@@ -1,9 +1,13 @@
 import os
 import json
+import csv
+import base64
 import heapq
 import multiprocessing as mp
+import requests
+import io
+import re
 
-from UnityPy import AssetsManager
 import UnityPy
 from shutil import copyfile
 from PIL import Image
@@ -78,9 +82,6 @@ class Unpack:
             for newcontent in newcontents:
                 self.extract_nc(newcontent)
 
-        # # In case skills crash
-        # self.make_report()
-
         # Look for new skills
         if "_skillreport.txt" not in os.listdir('.'):
             print(Fore.MAGENTA + Style.BRIGHT +
@@ -108,10 +109,10 @@ class Unpack:
         print(f"[unpacking] Creating folder {foldername}")
         os.mkdir(foldername)
 
-        # Unpack images
+        # Unpack files
         print(f"[unpacking] Starting unpacking")
         for obj in env.objects:
-            # Process specific object types
+            # Images
             if obj.type.name in ['Texture2D', 'Sprite']:
                 data = obj.read()
                 dest = os.path.join(f"./{foldername}",
@@ -120,6 +121,8 @@ class Unpack:
                 dest = dest + ".png"
                 img = data.image
                 img.save(dest)
+                
+            # JSON data files
             elif obj.type.name == 'MonoBehaviour':
                 if obj.serialized_type.nodes:
                     # save decoded data
@@ -133,13 +136,45 @@ class Unpack:
                     fp = os.path.join(f"./{foldername}", f"{data.name}.bin")
                     with open(fp, "wb") as f:
                         f.write(data.raw_data)
+                        
+            # CSV and plaintext data files
             elif obj.type.name == "TextAsset":
                 data = obj.read()
-                if data.name.isnumeric():
-                    continue
-                fp = os.path.join(f'./{foldername}', f"{data.name}.txt")
-                with open(fp, 'wt', encoding='utf8') as f:
-                    f.write(data.text)
+
+                # "Bad words" - unencoded, save as plaintext
+                if "BAD_WORDS" in data.name:
+                    fp = os.path.join(f'./{foldername}', f"{data.name}.txt")
+                    with open(fp, 'wt', encoding='utf8') as f:
+                        f.write(data.text)
+                        
+                # "Map data" - encoded JSON, save into separate files
+                elif data.name.isnumeric():
+                    folder_path = os.path.join(f'./{foldername}', 'maps')
+                    os.makedirs(folder_path, exist_ok=True)
+                    
+                    byte_string = base64.b64decode(data.text)
+                    decoded_string = byte_string.decode('utf-16le')
+                    fixed_json_string = re.sub(r'}\s*{', '},{', decoded_string)
+                    json_data = []
+                    try:
+                        json_data = json.loads(fixed_json_string)
+                        fp = os.path.join(f'./{foldername}', 'maps', f"{data.name}.json")
+                    except json.decoder.JSONDecodeError:
+                        json_data = "Failed :("
+                        fp = os.path.join(f'./{foldername}', 'maps', f"FAIL_{data.name}.json")
+                    with open(fp, 'wt', encoding='utf8') as f:
+                        json.dump(json_data, f, indent=4)
+                
+                # Anything else - encoded CSV
+                else:
+                    fp = os.path.join(f'./{foldername}', f"{data.name}.csv")
+                    byte_string = base64.b64decode(data.text)
+                    decoded_string = byte_string.decode('utf-16le')
+                    decoded_lines = decoded_string.split('\n')
+                    decoded_data = [line.strip().split('\t') for line in decoded_lines]
+                    with open(fp, 'wt', newline='', encoding='utf8') as f:
+                        writer = csv.writer(f)
+                        writer.writerows(decoded_data)
 
         print(f"[unpacking] Finished unpacking")
 
@@ -163,7 +198,6 @@ class Unpack:
                         slate = Image.new('RGBA', (w, h))
                         slate.paste(img, (0, 0), mask)
                         slate.save(f'{name}')
-                        # print(f"Saved {name}!")
                         os.remove(name[:-4] + "_alpha.png")
                     except (FileNotFoundError, ValueError):
                         fail_list.append(name)
@@ -229,48 +263,6 @@ class Unpack:
                     pass
         print('[find_new] Copied all new files to "new" directory')
 
-    def compare(self):
-        """Compares string tables"""
-
-        # Map csvs to sets
-        try:
-            with open(f'./{self.current}/stringTable_en.csv',
-                      'r',
-                      encoding='utf8') as t1, open(
-                          f'./{self.past}/stringTable_en.csv',
-                          'r',
-                          encoding='utf8') as t2:
-                set1 = set(map(tuple, csv.reader(t1)))
-                set2 = set(map(tuple, csv.reader(t2)))
-        except FileNotFoundError:
-            print('[compare] Either csv not found, exiting')
-            return
-
-        # Find differences
-        print("[compare] Comparing csvs")
-        added = set1 - set2
-        removed = set2 - set1
-
-        # Write additions to output file
-        if len(added) > 0:
-            print("[compare] Writing added strings")
-            output = csv.writer(
-                open(f'./{self.current}/added.csv', 'w', encoding='utf-8'))
-            for row in sorted(added, key=lambda x: x[0], reverse=True):
-                output.writerow(row)
-        else:
-            print("[compare] No new strings added")
-
-        # Write removals to output file
-        if len(removed) > 0:
-            print("[compare] Writing removed strings")
-            output = csv.writer(
-                open(f'./{self.current}/removed.csv', 'w', encoding='utf-8'))
-            for row in sorted(removed, key=lambda x: x[0], reverse=True):
-                output.writerow(row)
-        else:
-            print("[compare] No old strings removed")
-
     def extract_nc(self, filename):
         """Extracts and resizes "new contents" files."""
 
@@ -297,8 +289,18 @@ class Unpack:
             new = json.load(f)
         with open(f"../{self.past}/text/HERO_SKILL.json") as f:
             old = json.load(f)
-        with open("../../char_ids.json") as f:
-            chars = json.load(f)
+
+        # Load and format chars.json from thanosvibs
+        url = "https://thanosvibs.money/static/data/chars.json"
+        response = requests.get(url)
+        if response.status_code == 200:
+            bytes_io = io.BytesIO(response.content)
+            json_str = bytes_io.read().decode('utf-8')
+            json_data = json.loads(json_str)
+        else:
+            print(f"Failed to retrieve chars.json: {response.status_code}")
+        chars = {str(x['id']): x['character'] for x in json_data if x['uniformed'] == 'False'}
+
         print("[skills] Loaded skill files into dicts")
 
         # Variables are now lists of dicts
@@ -340,8 +342,7 @@ class Unpack:
                         except KeyError:
                             pass
                     except KeyError:
-                        print("Unknown hero group id")
-                        print(skill['heroGroupId'])
+                        print(f"Unknown hero group id: {skill['heroGroupId']}")
 
         # Terminal output
         print(f"[skills] Identified {new_skill_count} new skills for {', '.join(new_skill_chars.keys())}")
@@ -410,76 +411,70 @@ class Unpack:
     def make_report(self):
         """Generate a report for the datamine job"""
 
-        # Loop to handle multiple reports for same folder
-        done = False
+        # Get report number
         index = 0
-        while not done:
-            if f"_report{index}.txt" in os.listdir('.'):
-                index += 1
-            else:
-                done = True
+        while f"_report{index}.txt" in os.listdir('.'):
+            index += 1
 
-                # Make list of lists for table
-                table_data = [
-                    ['version', self.current]
-                    # ['bundles', self.report['files']],
-                    # ['altered bundles', ', '.join(self.report['newfiles'])]
-                    # ['new strings', self.report['added']],
-                    # ['removed strings', self.report['removed']],
-                    # ['new skill count', self.report['skillcount']],
-                    # ['new skill chars', self.report['skillchars']],
-                    # ['new t3/tp chars', self.report['t3tpchars']]
-                ]
-                index_tracker = 1
-                if len(self.report['files']) > 0:
-                    file_index = index_tracker
-                    index_tracker += 1
-                    file_string = ', '.join(self.report['files'])
-                    table_data.append(['bundles', ''])
-                if 'newfiles' in self.report.keys() and len(self.report['newfiles']) > 0:
-                    newfile_index = index_tracker
-                    index_tracker += 1
-                    newfile_string = ', '.join(self.report['newfiles'])
-                    table_data.append(['altered bundles', ''])
-                if 'added' in self.report.keys():
-                    index_tracker += 2
-                    table_data.append(['new strings', self.report['added']])
-                    table_data.append(['removed strings', self.report['removed']])
-                if 'skillcount' in self.report.keys() and self.report['skillcount'] > 0:
-                    skill_index = index_tracker + 1
-                    index_tracker += 2
-                    table_data.append(['new skill count', self.report['skillcount']])
-                    table_data.append(['new skill chars', ''])
-                if 't3tpchars' in self.report.keys() and len(self.report['t3tpchars']) > 0:
-                    t3tp_index = index_tracker
-                    table_data.append(['new t3/tp chars', self.report['t3tpchars']])
+        # Make list of lists for table
+        table_data = [
+            ['version', self.current]
+            # ['bundles', self.report['files']],
+            # ['altered bundles', ', '.join(self.report['newfiles'])]
+            # ['new strings', self.report['added']],
+            # ['removed strings', self.report['removed']],
+            # ['new skill count', self.report['skillcount']],
+            # ['new skill chars', self.report['skillchars']],
+            # ['new t3/tp chars', self.report['t3tpchars']]
+        ]
+        index_tracker = 1
+        if len(self.report['files']) > 0:
+            file_index = index_tracker
+            index_tracker += 1
+            file_string = ', '.join(self.report['files'])
+            table_data.append(['bundles', ''])
+        if 'newfiles' in self.report.keys() and len(self.report['newfiles']) > 0:
+            newfile_index = index_tracker
+            index_tracker += 1
+            newfile_string = ', '.join(self.report['newfiles'])
+            table_data.append(['altered bundles', ''])
+        if 'added' in self.report.keys():
+            index_tracker += 2
+            table_data.append(['new strings', self.report['added']])
+            table_data.append(['removed strings', self.report['removed']])
+        if 'skillcount' in self.report.keys() and self.report['skillcount'] > 0:
+            skill_index = index_tracker + 1
+            index_tracker += 2
+            table_data.append(['new skill count', self.report['skillcount']])
+            table_data.append(['new skill chars', ''])
+        if 't3tpchars' in self.report.keys() and len(self.report['t3tpchars']) > 0:
+            t3tp_index = index_tracker
+            table_data.append(['new t3/tp chars', self.report['t3tpchars']])
 
-                # Initialise table
-                if len(table_data) > 0:
-                    table = terminaltables.AsciiTable(table_data, 'datamine results')
+        # Initialise table
+        if len(table_data) > 0:
+            table = terminaltables.AsciiTable(table_data, 'datamine results')
 
-                    # Calculate newlines
-                    max_width = table.column_max_width(1)
-                    if len(self.report['files']) > 0:
-                        wrapped_string = '\n'.join(wrap(file_string, max_width))
-                        table.table_data[file_index][1] = wrapped_string
-                    if 'newfiles' in self.report.keys() and len(self.report['newfiles']) > 0:
-                        wrapped_string = '\n'.join(wrap(newfile_string, max_width))
-                        table.table_data[newfile_index][1] = wrapped_string
-                    if 'skillcount' in self.report.keys() and self.report['skillcount'] > 0:
-                        wrapped_string = '\n'.join(wrap(self.report['skillchars'], max_width))
-                        table.table_data[skill_index][1] = wrapped_string
-                    if 't3tpchars' in self.report.keys() and len(self.report['t3tpchars']) > 0:
-                        wrapped_string = '\n'.join(wrap(self.report['t3tpchars'], max_width))
-                        table.table_data[t3tp_index][1] = wrapped_string
+            # Calculate newlines
+            max_width = table.column_max_width(1)
+            if len(self.report['files']) > 0:
+                wrapped_string = '\n'.join(wrap(file_string, max_width))
+                table.table_data[file_index][1] = wrapped_string
+            if 'newfiles' in self.report.keys() and len(self.report['newfiles']) > 0:
+                wrapped_string = '\n'.join(wrap(newfile_string, max_width))
+                table.table_data[newfile_index][1] = wrapped_string
+            if 'skillcount' in self.report.keys() and self.report['skillcount'] > 0:
+                wrapped_string = '\n'.join(wrap(self.report['skillchars'], max_width))
+                table.table_data[skill_index][1] = wrapped_string
+            if 't3tpchars' in self.report.keys() and len(self.report['t3tpchars']) > 0:
+                wrapped_string = '\n'.join(wrap(self.report['t3tpchars'], max_width))
+                table.table_data[t3tp_index][1] = wrapped_string
 
-                    print(table.table)
+            print(table.table)
 
-                    # Write to text file
-                    with open(f"_report{index}.txt", 'w', encoding='utf8') as f:
-                        f.write(table.table)            
-
-
+            # Write to text file
+            with open(f"_report{index}.txt", 'w', encoding='utf8') as f:
+                f.write(table.table)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
