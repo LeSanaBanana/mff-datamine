@@ -212,7 +212,7 @@ class Unpack:
                         slate = Image.new('RGBA', (w, h))
 
                         slate.paste(img, (0, 0), mask)
-                        slate.save(f'{name}')
+                        slate.save(f'{name.lower()}')
                     except (FileNotFoundError, ValueError):
                         fail_list.append(name)
         print("[unmask] Finished unmasking")
