@@ -112,11 +112,16 @@ class Unpack:
         # Unpack files
         print(f"[unpacking] Starting unpacking")
         for obj in env.objects:
+            
             # Images
             if obj.type.name in ['Texture2D', 'Sprite']:
                 data = obj.read()
-                dest = os.path.join(f"./{foldername}",
-                                    data.name)  # output destination
+                if filename == "ui_skillicons.unity3d":
+                    dest = os.path.join(f"./{foldername}",
+                                        data.name.lower())  # output destination
+                else:
+                    dest = os.path.join(f"./{foldername}",
+                                        data.name)  # output destination
                 dest, ext = os.path.splitext(dest)
                 dest = dest + ".png"
                 img = data.image
@@ -186,7 +191,7 @@ class Unpack:
         os.chdir(f"./{foldername}")
         fail_list = []
 
-        if foldername.lower() != "ui_skillicons":
+        if foldername.lower() != "ui_skillicons":   
             print(f"[unmask] Starting unmasking")
             for name in os.listdir('.'):
                 if 'alpha' not in name and ".png" in name:
@@ -201,21 +206,6 @@ class Unpack:
                         os.remove(name[:-4] + "_alpha.png")
                     except (FileNotFoundError, ValueError):
                         fail_list.append(name)
-        else:
-            print(f"[unmask] Starting skill icon unmasking")
-            for name in os.listdir('.'):
-                if 'alpha' not in name and ".png" in name:
-                    try:
-                        mask = Image.open("alpha.png").convert('L')
-                        img = Image.open(name).convert('RGBA')
-                        w, h = img.size
-                        slate = Image.new('RGBA', (w, h))
-
-                        slate.paste(img, (0, 0), mask)
-                        slate.save(f'{name.lower()}')
-                    except (FileNotFoundError, ValueError):
-                        fail_list.append(name)
-        print("[unmask] Finished unmasking")
 
         # Fail list, if anything failed
         if len(fail_list) > 0:
